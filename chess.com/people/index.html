@@ -1,0 +1,552 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>ManoChess — Multiplayer</title>
+
+<!-- chess.js (client) -->
+<script src="https://cdn.jsdelivr.net/npm/chess.js@1.0.0/chess.min.js"></script>
+<!-- socket.io client will be served by the server at /socket.io/socket.io.js -->
+
+<style>
+  :root{
+    --bg1:#071428; --bg2:#0f2540; --accent:#ffd166;
+    --board-light:#f0d9b5; --board-dark:#b58863;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Arial;background:linear-gradient(180deg,var(--bg1),var(--bg2));color:#fff}
+  header{display:flex;justify-content:space-between;align-items:center;padding:12px 18px;background:rgba(255,255,255,0.03);z-index:40;position:relative}
+  .brand{font-weight:700}
+  .controls{display:flex;gap:8px}
+  button{background:transparent;border:1px solid rgba(255,255,255,0.12);padding:6px 10px;border-radius:8px;color:#fff;cursor:pointer}
+  .container{display:grid;grid-template-columns:260px 1fr 260px;gap:16px;padding:18px}
+  .panel{background:rgba(255,255,255,0.04);padding:12px;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,0.45)}
+  .boardWrap{display:flex;align-items:center;justify-content:center}
+  .board{width:min(84vmin,680px);aspect-ratio:1;display:grid;grid-template-columns:repeat(8,1fr);padding:10px;border-radius:16px;position:relative;box-shadow:0 12px 40px rgba(0,0,0,0.6);overflow:visible;z-index:10}
+  .square{position:relative;width:100%;height:100%}
+  .cell{width:100%;height:100%;border-radius:10px}
+  .square.light .cell{background:var(--board-light)}
+  .square.dark .cell{background:var(--board-dark)}
+  .piece{position:absolute;width:72%;height:72%;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;transition:transform 240ms cubic-bezier(.2,.8,.2,1),opacity 180ms linear;user-select:none;z-index:20}
+  .piece.white{background:linear-gradient(180deg,#fff,#f2f2f2);box-shadow: inset 0 -6px 8px rgba(0,0,0,0.06), 0 12px 30px rgba(2,6,23,0.45);color:#111}
+  .piece.black{background:linear-gradient(180deg,#1f2937,#0b1220);box-shadow: inset 0 -6px 8px rgba(255,255,255,0.02), 0 12px 30px rgba(0,0,0,0.6);color:#fff}
+  .symbol{font-size:20px;pointer-events:none}
+  .highlight{outline:3px solid rgba(255,210,102,0.95);box-shadow:0 0 20px rgba(255,210,102,0.12);border-radius:8px}
+  .overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:linear-gradient(90deg,rgba(0,0,0,0.45),rgba(0,0,0,0.65));z-index:200}
+  .hidden{display:none}
+  .popup{background:white;padding:20px;border-radius:12px;color:#111;min-width:300px;text-align:center}
+  .confetti{position:fixed;inset:0;pointer-events:none;z-index:220}
+  .bg-anim{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+  .statusRow{display:flex;gap:12px;align-items:center}
+  @media (max-width:900px){ .container{grid-template-columns:1fr;grid-auto-rows:auto;padding:10px} }
+</style>
+</head>
+<body>
+  <!-- animated background (subtle) -->
+  <div class="bg-anim" aria-hidden="true">
+    <canvas id="bgCanvas"></canvas>
+  </div>
+
+  <header>
+    <div class="brand">ManoChess</div>
+    <div class="controls">
+      <div class="statusRow">
+        <span id="statusText">Disconnected</span>
+        <span id="roomDisplay">—</span>
+        <span id="roleDisplay">—</span>
+        <span id="turnDisplay">—</span>
+      </div>
+      <button id="createRoomBtn">Create Room</button>
+      <button id="copyLinkBtn">Copy Link</button>
+      <button id="flipBtn">Flip</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <aside class="panel">
+      <div><strong>Info</strong></div>
+      <div style="margin-top:8px">Room: <span id="roomId">—</span></div>
+      <div style="margin-top:6px">Role: <span id="role">—</span></div>
+      <div style="margin-top:6px">Turn: <span id="turnIndicator">—</span></div>
+      <div style="margin-top:12px">
+        <button id="newBtn">New (local)</button>
+        <button id="resignBtn">Resign</button>
+      </div>
+      <div style="margin-top:12px;font-size:13px;opacity:0.9">
+        Tip: open same URL <code>?room=ID</code> in two browsers/tabs to play online.
+      </div>
+    </aside>
+
+    <main class="boardWrap">
+      <div id="board" class="board" aria-label="Chess board"></div>
+    </main>
+
+    <aside class="panel">
+      <div><strong>Move History</strong></div>
+      <ol id="movesList" style="margin-top:8px"></ol>
+    </aside>
+  </div>
+
+  <!-- result popup -->
+  <div id="overlay" class="overlay hidden" role="dialog" aria-hidden="true">
+    <div class="popup">
+      <h2 id="resultTitle">Result</h2>
+      <p id="resultText"></p>
+      <div style="margin-top:12px">
+        <button id="closePopupBtn">Close</button>
+        <button id="rematchBtn">Rematch</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- confetti canvas -->
+  <canvas id="confettiCanvas" class="confetti hidden"></canvas>
+
+  <!-- socket.io client (served by server) -->
+  <script src="/socket.io/socket.io.js"></script>
+
+  <script>
+  (function(){
+    // DOM refs
+    const boardEl = document.getElementById('board');
+    const roomIdSpan = document.getElementById('roomId');
+    const roleSpan = document.getElementById('role');
+    const statusText = document.getElementById('statusText');
+    const turnIndicator = document.getElementById('turnIndicator');
+    const movesList = document.getElementById('movesList');
+    const overlay = document.getElementById('overlay');
+    const resultTitle = document.getElementById('resultTitle');
+    const resultText = document.getElementById('resultText');
+    const confettiCanvas = document.getElementById('confettiCanvas');
+    const bgCanvas = document.getElementById('bgCanvas');
+
+    // engine & state
+    let game = new Chess(); // client-side copy for UI, but server authoritative in multiplayer
+    let pieces = {}; // square -> element
+    let selectedSquare = null;
+    let isFlipped = false;
+
+    // networking
+    let socket = null;
+    let currentRoom = null;
+    let myRole = 'local'; // 'w', 'b', 'spectator', 'local'
+
+    // --- Helper: board square mapping ---
+    function idxToSq(r,c){ return String.fromCharCode(97 + c) + (8 - r); }
+    function sqToIdx(sq){ return { c: sq.charCodeAt(0) - 97, r: 8 - parseInt(sq[1],10) }; }
+
+    // --- Build board DOM cells ---
+    function buildBoard(){
+      boardEl.innerHTML = '';
+      for(let r=0;r<8;r++){
+        for(let c=0;c<8;c++){
+          const sq = idxToSq(r,c);
+          const wrapper = document.createElement('div');
+          wrapper.className = 'square ' + (((r+c)%2===0)?'light':'dark');
+          wrapper.dataset.square = sq;
+          const cell = document.createElement('div');
+          cell.className = 'cell';
+          wrapper.appendChild(cell);
+          wrapper.addEventListener('click', ()=> onSquareClick(sq));
+          boardEl.appendChild(wrapper);
+        }
+      }
+    }
+
+    // --- Render pieces from current game position ---
+    function renderPieces(animate=true){
+      // ensure layout measured
+      const boardRect = boardEl.getBoundingClientRect();
+      const size = boardRect.width / 8;
+      const pos = game.board();
+
+      // build map of target squares
+      const current = {};
+      for(let r=0;r<8;r++){
+        for(let c=0;c<8;c++){
+          const p = pos[r][c];
+          if(p) current[idxToSq(r,c)] = { type: p.type, color: p.color };
+        }
+      }
+
+      // remove captured pieces (animate)
+      for(const sq of Object.keys(pieces)){
+        if(!current[sq]){
+          const el = pieces[sq];
+          if(el){
+            el.style.transition = 'transform 160ms ease, opacity 160ms linear';
+            el.style.transform += ' scale(0.18) rotate(12deg)';
+            el.style.opacity = '0';
+            setTimeout(()=> el.remove(), 170);
+          }
+          delete pieces[sq];
+        }
+      }
+
+      // create/move pieces
+      for(const [sq, data] of Object.entries(current)){
+        if(pieces[sq]) continue; // already present (we'll not re-place in this simple flow)
+
+        // find candidate source (heuristic to animate moves)
+        let fromSq = null;
+        for(const f of Object.keys(pieces)){
+          if(!current[f]){
+            const el = pieces[f];
+            if(el && el.dataset.type === data.type && el.dataset.color === data.color && !fromSq){
+              fromSq = f;
+            }
+          }
+        }
+
+        const cellEl = document.querySelector(`.square[data-square="${sq}"]`);
+        const cellRect = cellEl.getBoundingClientRect();
+        const centerX = cellRect.left - boardRect.left + cellRect.width/2;
+        const centerY = cellRect.top - boardRect.top + cellRect.height/2;
+
+        const el = document.createElement('div');
+        el.className = 'piece ' + (data.color === 'w' ? 'white' : 'black');
+        el.dataset.type = data.type;
+        el.dataset.color = data.color;
+        el.dataset.square = sq;
+        el.innerHTML = `<div class="symbol">${symbolFor(data.type)}</div>`;
+        el.style.position = 'absolute';
+        el.style.left = (centerX - (size*0.36)) + 'px';
+        el.style.top = (centerY - (size*0.36)) + 'px';
+        el.style.opacity = '1';
+
+        // if moved from a tracked fromSq, animate from there
+        if(fromSq && animate){
+          const fromCell = document.querySelector(`.square[data-square="${fromSq}"]`);
+          if(fromCell){
+            const fr = fromCell.getBoundingClientRect();
+            const fx = fr.left - boardRect.left + fr.width/2 - (size*0.36);
+            const fy = fr.top - boardRect.top + fr.height/2 - (size*0.36);
+            el.style.left = fx + 'px';
+            el.style.top = fy + 'px';
+            boardEl.appendChild(el);
+            pieces[sq] = el;
+            requestAnimationFrame(()=>{
+              el.style.transition = 'transform 220ms cubic-bezier(.2,.8,.2,1)';
+              const dx = centerX - (fx + (size*0.36));
+              const dy = centerY - (fy + (size*0.36));
+              el.style.transform = `translate3d(${dx}px,${dy}px,0)`;
+              setTimeout(()=>{
+                el.style.transition = '';
+                el.style.transform = '';
+                el.style.left = (centerX - (size*0.36)) + 'px';
+                el.style.top = (centerY - (size*0.36)) + 'px';
+              }, 230);
+            });
+            el.addEventListener('click', (ev)=> { ev.stopPropagation(); onPieceClick(sq); });
+            continue;
+          }
+        }
+
+        // normal placement
+        boardEl.appendChild(el);
+        pieces[sq] = el;
+        el.addEventListener('click', (ev)=> { ev.stopPropagation(); onPieceClick(sq); });
+      }
+
+      updateMoves();
+      updateTurn();
+    }
+
+    function symbolFor(type){
+      const map = { p:'♟', r:'♜', n:'♞', b:'♝', q:'♛', k:'♚' };
+      return map[type] || type;
+    }
+
+    // --- Selection & move attempts ---
+    function onPieceClick(sq){
+      selectedSquare = sq;
+      clearHighlights();
+      highlightMovesFrom(sq);
+    }
+    function onSquareClick(sq){
+      if(selectedSquare){
+        attemptMove(selectedSquare, sq);
+        selectedSquare = null;
+        clearHighlights();
+      } else {
+        clearHighlights();
+      }
+    }
+    function highlightMovesFrom(sq){
+      const moves = game.moves({ square: sq, verbose:true });
+      const originCell = document.querySelector(`.square[data-square="${sq}"] .cell`);
+      if(originCell) originCell.classList.add('highlight');
+      moves.forEach(m => {
+        const el = document.querySelector(`.square[data-square="${m.to}"] .cell`);
+        if(el) el.classList.add('highlight');
+      });
+    }
+    function clearHighlights(){ document.querySelectorAll('.cell.highlight').forEach(e => e.classList.remove('highlight')); }
+
+    // --- Attempt move (send to server if connected) ---
+    function attemptMove(from, to){
+      if(socket && currentRoom){
+        // send to server for validation (server authoritative)
+        socket.emit('try-move', { room: currentRoom, from, to, promotion: 'q' });
+      } else {
+        // local hotseat
+        const mv = game.move({ from, to, promotion: 'q' });
+        if(!mv) {
+          flashIllegal(from);
+          return;
+        }
+        renderPieces(true);
+        checkGameOver();
+      }
+    }
+    function flashIllegal(sq){
+      const cell = document.querySelector(`.square[data-square="${sq}"] .cell`);
+      if(cell){
+        cell.classList.add('highlight');
+        setTimeout(()=> cell.classList.remove('highlight'), 260);
+      }
+    }
+
+    // --- Move history & indicators ---
+    function updateMoves(){
+      movesList.innerHTML = '';
+      const history = game.history({ verbose:true });
+      for(let i=0;i<history.length;i+=2){
+        const white = history[i] ? history[i].san : '';
+        const black = history[i+1] ? history[i+1].san : '';
+        const li = document.createElement('li');
+        li.textContent = `${(i/2)+1}. ${white} ${black}`;
+        movesList.appendChild(li);
+      }
+    }
+    function updateTurn(){
+      const t = game.turn() === 'w' ? 'White' : 'Black';
+      turnIndicator.textContent = t;
+    }
+
+    // --- Game over check (client-side notifications) ---
+    function checkGameOver(){
+      setTimeout(()=>{
+        if(game.in_checkmate()){
+          const winner = game.turn() === 'w' ? 'Black' : 'White';
+          showResult(`${winner} wins by checkmate`, `${winner} wins`);
+        } else if(game.in_stalemate()){
+          showResult('Draw by stalemate', 'Draw');
+        } else if(game.in_draw && game.in_draw()){
+          showResult('Draw', 'Draw');
+        }
+      }, 250);
+    }
+
+    // --- Result overlay & confetti ---
+    function showResult(title,sub){
+      resultTitle.textContent = title;
+      resultText.textContent = sub;
+      overlay.classList.remove('hidden');
+      if(!/draw/i.test(title)) startConfetti();
+    }
+    function closeResult(){ overlay.classList.add('hidden'); stopConfetti(); }
+
+    // --- Confetti (lightweight) ---
+    let confettiAnim = null;
+    function startConfetti(){
+      const c = confettiCanvas; c.classList.remove('hidden');
+      c.width = window.innerWidth; c.height = window.innerHeight;
+      const ctx = c.getContext('2d');
+      let parts = [];
+      for(let i=0;i<90;i++){
+        parts.push({ x: Math.random()*c.width, y: -Math.random()*c.height, vx: (-2+Math.random()*4), vy: 2+Math.random()*4, s: 6+Math.random()*8, r: Math.random()*360, color: Math.random()>0.5 ? '#ffd166' : '#06d6a0' });
+      }
+      function frame(){
+        ctx.clearRect(0,0,c.width,c.height);
+        parts.forEach(p=>{
+          p.x += p.vx; p.y += p.vy; p.r += 6;
+          ctx.save(); ctx.translate(p.x,p.y); ctx.rotate(p.r*Math.PI/180); ctx.fillStyle = p.color; ctx.fillRect(-p.s/2,-p.s/2,p.s,p.s*0.6); ctx.restore();
+        });
+        parts = parts.filter(p=>p.y < c.height + 40);
+        if(parts.length>0) confettiAnim = requestAnimationFrame(frame);
+        else { ctx.clearRect(0,0,c.width,c.height); c.classList.add('hidden'); }
+      }
+      confettiAnim = requestAnimationFrame(frame);
+    }
+    function stopConfetti(){ if(confettiAnim) cancelAnimationFrame(confettiAnim); confettiCanvas.getContext('2d').clearRect(0,0,confettiCanvas.width,confettiCanvas.height); confettiCanvas.classList.add('hidden'); }
+
+    // --- Networking (Socket.IO) ---
+    function initSocket(roomIdFromUrl){
+      if(!window.io) {
+        // socket.io script not loaded (server not running). remain in local mode.
+        statusText.textContent = 'Local';
+        myRole = 'local';
+        roleSpan.textContent = myRole;
+        game.reset();
+        renderPieces(false);
+        return;
+      }
+      socket = io();
+
+      socket.on('connect', () => {
+        statusText.textContent = 'Connected';
+        socket.emit('join', { room: roomIdFromUrl });
+      });
+
+      socket.on('state', (payload) => {
+        if(payload.fen){
+          game.load(payload.fen);
+          renderPieces(true);
+        } else if(payload.pgn){
+          // fallback
+          game.load_pgn(payload.pgn);
+          renderPieces(true);
+        }
+        updateTurn();
+      });
+
+      socket.on('room-info', (info) => {
+        // determine this client's role
+        currentRoom = roomIdFromUrl;
+        roomIdSpan.textContent = currentRoom;
+        // the server sends players mapping: socketId -> color
+        // find socket id in mapping (server does not send id => need to ask server, but server earlier assigned)
+        // We'll request role by checking our socket id in mapping:
+        const players = info.players || {};
+        const myId = socket.id;
+        const assigned = players[myId] || null;
+        myRole = assigned || 'spectator';
+        roleSpan.textContent = myRole;
+      });
+
+      socket.on('game-over', (data) => {
+        if(data && data.winner){
+          const winner = (data.winner === 'w' || data.winner === 'b') ? (data.winner === 'w' ? 'White' : 'Black') : data.winner;
+          showResult(`${winner} wins (${data.reason || 'game over'})`, `${winner} wins`);
+        } else {
+          showResult('Game Over', data.reason || '');
+        }
+      });
+
+      socket.on('illegal', (info) => {
+        alert('Move rejected: ' + (info.reason || 'illegal'));
+        // request canonical state back from server if possible
+        socket.emit('request-state', { room: currentRoom });
+      });
+
+      socket.on('disconnect', () => {
+        statusText.textContent = 'Disconnected';
+        myRole = 'spectator';
+        roleSpan.textContent = myRole;
+      });
+
+      // store room locally
+      currentRoom = roomIdFromUrl;
+      roomIdSpan.textContent = currentRoom;
+    }
+
+    // --- Buttons & UI wiring ---
+    document.getElementById('createRoomBtn').addEventListener('click', ()=>{
+      const id = Math.random().toString(36).slice(2,9);
+      const url = new URL(window.location.href);
+      url.searchParams.set('room', id);
+      window.location.href = url.toString();
+    });
+
+    document.getElementById('copyLinkBtn').addEventListener('click', ()=>{
+      navigator.clipboard?.writeText(window.location.href).then(()=> alert('Link copied'));
+    });
+
+    document.getElementById('flipBtn').addEventListener('click', ()=>{
+      isFlipped = !isFlipped;
+      boardEl.style.transform = isFlipped ? 'rotate(180deg)' : '';
+      // re-render to fix piece placement after rotation
+      setTimeout(()=> renderPieces(false), 80);
+    });
+
+    document.getElementById('newBtn').addEventListener('click', ()=>{
+      game.reset();
+      renderPieces(false);
+      closeResult();
+      if(socket && currentRoom) socket.emit('rematch', { room: currentRoom });
+    });
+
+    document.getElementById('resignBtn').addEventListener('click', ()=>{
+      if(socket && currentRoom){
+        socket.emit('resign', { room: currentRoom });
+      } else {
+        const winner = game.turn() === 'w' ? 'Black' : 'White';
+        showResult(`${winner} wins (resign)`, `${winner} wins`);
+      }
+    });
+
+    document.getElementById('closePopupBtn').addEventListener('click', closeResult);
+    document.getElementById('rematchBtn').addEventListener('click', ()=>{
+      if(socket && currentRoom) socket.emit('rematch', { room: currentRoom });
+      game.reset(); renderPieces(false); closeResult();
+    });
+
+    // --- Animated background (subtle) ---
+    function startBgAnimation(){
+      const c = bgCanvas; const ctx = c.getContext('2d');
+      function resize(){ c.width = window.innerWidth; c.height = window.innerHeight; }
+      resize(); window.addEventListener('resize', resize);
+      const stars = [];
+      for(let i=0;i<120;i++){
+        stars.push({ x: Math.random()*c.width, y: Math.random()*c.height, r: Math.random()*1.6, a: 0.2 + Math.random()*0.6 });
+      }
+      let t=0;
+      function frame(){
+        ctx.clearRect(0,0,c.width,c.height);
+        // gradient overlay
+        const g = ctx.createLinearGradient(0,0,c.width,c.height);
+        g.addColorStop(0,'rgba(255,255,255,0.01)');
+        g.addColorStop(1,'rgba(0,0,0,0.05)');
+        ctx.fillStyle = g; ctx.fillRect(0,0,c.width,c.height);
+        // subtle moving stars
+        stars.forEach(s=>{
+          s.y += Math.sin((s.x + t)/120)*0.2 + 0.1;
+          s.x += Math.cos((s.y + t)/140)*0.05;
+          if(s.y > c.height+10) s.y = -10;
+          if(s.x > c.width+10) s.x = -10;
+          ctx.beginPath();
+          ctx.fillStyle = 'rgba(255,255,255,'+s.a+')';
+          ctx.arc(s.x, s.y, s.r, 0, Math.PI*2);
+          ctx.fill();
+        });
+        t += 0.6;
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    }
+
+    // --- Init: build and render once layout stable ---
+    function init(){
+      buildBoard();
+      const q = new URLSearchParams(window.location.search);
+      const r = q.get('room');
+      if(r && window.io){
+        // initialize socket after socket.io script loaded
+        initSocket(r);
+      } else if(r && !window.io){
+        // server not present: still show room id and local mode
+        roomIdSpan.textContent = r;
+        statusText.textContent = 'Local (server not found)';
+        myRole = 'local';
+        roleSpan.textContent = myRole;
+      } else {
+        // no room: local hotseat
+        statusText.textContent = 'Local';
+        myRole = 'local';
+        roleSpan.textContent = myRole;
+      }
+      game.reset();
+      renderPieces(false);
+      window.addEventListener('resize', ()=> renderPieces(false));
+      startBgAnimation();
+    }
+
+    // run init after DOM loaded
+    if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+
+  })();
+  </script>
+</body>
+</html>
